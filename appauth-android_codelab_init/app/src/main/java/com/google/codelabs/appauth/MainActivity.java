@@ -20,7 +20,6 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
-import android.os.PersistableBundle;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.design.widget.Snackbar;
@@ -41,6 +40,7 @@ import net.openid.appauth.AuthorizationRequest;
 import net.openid.appauth.AuthorizationResponse;
 import net.openid.appauth.AuthorizationService;
 import net.openid.appauth.AuthorizationServiceConfiguration;
+import net.openid.appauth.ResponseTypeValues;
 import net.openid.appauth.TokenResponse;
 
 import org.json.JSONException;
@@ -114,14 +114,32 @@ public class MainActivity extends AppCompatActivity {
    * @param intent represents the {@link Intent} from the Custom Tabs or the System Browser.
    */
   private void handleAuthorizationResponse(@NonNull Intent intent) {
-
-    // code from the step 'Handle the Authorization Response' goes here.
-
+    AuthorizationResponse response = AuthorizationResponse.fromIntent(intent);
+    AuthorizationException error = AuthorizationException.fromIntent(intent);
+    final AuthState authState = new AuthState(response, error);
+    if (response != null) {
+      Log.i(LOG_TAG, String.format("Handled Authorization Response %s ", authState.jsonSerializeString()));
+      AuthorizationService service = new AuthorizationService(this);
+      service.performTokenRequest(response.createTokenExchangeRequest(), new AuthorizationService.TokenResponseCallback() {
+        @Override
+        public void onTokenRequestCompleted(@Nullable TokenResponse tokenResponse, @Nullable AuthorizationException exception) {
+          if (exception != null) {
+            Log.w(LOG_TAG, "Token Exchange failed", exception);
+          } else {
+            if (tokenResponse != null) {
+              authState.update(tokenResponse, exception);
+              persistAuthState(authState);
+              Log.i(LOG_TAG, String.format("Token Response [ Access Token: %s, ID Token: %s ]", tokenResponse.accessToken, tokenResponse.idToken));
+            }
+          }
+        }
+      });
+    }
   }
 
   private void persistAuthState(@NonNull AuthState authState) {
     getSharedPreferences(SHARED_PREFERENCES_NAME, Context.MODE_PRIVATE).edit()
-        .putString(AUTH_STATE, authState.toJsonString())
+        .putString(AUTH_STATE, authState.jsonSerializeString())
         .commit();
     enablePostAuthorizationFlows();
   }
@@ -139,7 +157,7 @@ public class MainActivity extends AppCompatActivity {
         .getString(AUTH_STATE, null);
     if (!TextUtils.isEmpty(jsonString)) {
       try {
-        return AuthState.fromJson(jsonString);
+        return AuthState.jsonDeserialize(jsonString);
       } catch (JSONException jsonException) {
         // should never happen
       }
@@ -153,11 +171,58 @@ public class MainActivity extends AppCompatActivity {
   public static class AuthorizeListener implements Button.OnClickListener {
     @Override
     public void onClick(View view) {
-
       // code from the step 'Create the Authorization Request',
       // and the step 'Perform the Authorization Request' goes here.
+      AuthorizationServiceConfiguration serviceConfiguration = new AuthorizationServiceConfiguration(
+              Uri.parse("https://accounts.google.com/o/oauth2/v2/auth") /* auth endpoint */,
+              Uri.parse("https://www.googleapis.com/oauth2/v4/token") /* token endpoint */
+      );
 
+      AuthorizationService authorizationService = new AuthorizationService(view.getContext());
+
+      // Build the authorization request
+      String clientId = "511828570984-fuprh0cm7665emlne3rnf9pk34kkn86s.apps.googleusercontent.com";
+      Uri redirectUri = Uri.parse("com.google.codelabs.appauth:/oauth2callback");
+      AuthorizationRequest.Builder builder = new AuthorizationRequest.Builder(
+              serviceConfiguration,
+              clientId,
+              ResponseTypeValues.CODE,
+              redirectUri);
+      builder.setScopes("profile");
+      AuthorizationRequest request = builder.build();
+
+      String action = "com.google.codelabs.appauth.HANDLE_AUTHORIZATION_RESPONSE";
+      Intent postAuthorizationIntent = new Intent(action);
+      PendingIntent pendingIntent = PendingIntent.getActivity(view.getContext(), request.hashCode(), postAuthorizationIntent, 0);
+      authorizationService.performAuthorizationRequest(request, pendingIntent);
     }
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    checkIntent(intent);
+  }
+
+  private void checkIntent(@Nullable Intent intent) {
+    if (intent != null) {
+      String action = intent.getAction();
+      switch (action) {
+        case "com.google.codelabs.appauth.HANDLE_AUTHORIZATION_RESPONSE":
+          if (!intent.hasExtra(USED_INTENT)) {
+            handleAuthorizationResponse(intent);
+            intent.putExtra(USED_INTENT, true);
+          }
+          break;
+        default:
+          // do nothing
+      }
+    }
+  }
+
+  @Override
+  protected void onStart() {
+    super.onStart();
+    checkIntent(getIntent());
   }
 
   public static class SignOutListener implements Button.OnClickListener {
@@ -190,9 +255,65 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     public void onClick(View view) {
+        mAuthState.performActionWithFreshTokens(mAuthorizationService, new AuthState.AuthStateAction() {
+            @Override
+            public void execute(@Nullable String accessToken, @Nullable String idToken, @Nullable AuthorizationException exception) {
+                new AsyncTask<String, Void, JSONObject>() {
+                    @Override
+                    protected JSONObject doInBackground(String... tokens) {
+                        OkHttpClient client = new OkHttpClient();
+                        Request request = new Request.Builder()
+                                .url("https://www.googleapis.com/oauth2/v3/userinfo")
+                                .addHeader("Authorization", String.format("Bearer %s", tokens[0]))
+                                .build();
 
-      // code from the section 'Making API Calls' goes here
+                        try {
+                            Response response = client.newCall(request).execute();
+                            String jsonBody = response.body().string();
+                            Log.i(LOG_TAG, String.format("User Info Response %s", jsonBody));
+                            return new JSONObject(jsonBody);
+                        } catch (Exception exception) {
+                            Log.w(LOG_TAG, exception);
+                        }
+                        return null;
+                    }
 
+                    @Override
+                    protected void onPostExecute(JSONObject userInfo) {
+                        if (userInfo != null) {
+                            String fullName = userInfo.optString("name", null);
+                            String givenName = userInfo.optString("given_name", null);
+                            String familyName = userInfo.optString("family_name", null);
+                            String imageUrl = userInfo.optString("picture", null);
+                            if (!TextUtils.isEmpty(imageUrl)) {
+                                Picasso.with(mMainActivity)
+                                        .load(imageUrl)
+                                        .placeholder(R.drawable.ic_account_circle_black_48dp)
+                                        .into(mMainActivity.mProfileView);
+                            }
+                            if (!TextUtils.isEmpty(fullName)) {
+                                mMainActivity.mFullName.setText(fullName);
+                            }
+                            if (!TextUtils.isEmpty(givenName)) {
+                                mMainActivity.mGivenName.setText(givenName);
+                            }
+                            if (!TextUtils.isEmpty(familyName)) {
+                                mMainActivity.mFamilyName.setText(familyName);
+                            }
+
+                            String message;
+                            if (userInfo.has("error")) {
+                                message = String.format("%s [%s]", mMainActivity.getString(R.string.request_failed), userInfo.optString("error_description", "No description"));
+                            } else {
+                                message = mMainActivity.getString(R.string.request_complete);
+                            }
+                            Snackbar.make(mMainActivity.mProfileView, message, Snackbar.LENGTH_SHORT)
+                                    .show();
+                        }
+                    }
+                }.execute(accessToken);
+            }
+        });
     }
   }
 }
