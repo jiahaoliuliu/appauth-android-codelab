@@ -40,7 +40,6 @@ import net.openid.appauth.AuthorizationRequest;
 import net.openid.appauth.AuthorizationResponse;
 import net.openid.appauth.AuthorizationService;
 import net.openid.appauth.AuthorizationServiceConfiguration;
-import net.openid.appauth.ResponseTypeValues;
 import net.openid.appauth.TokenResponse;
 
 import org.json.JSONException;
@@ -118,7 +117,7 @@ public class MainActivity extends AppCompatActivity {
     AuthorizationException error = AuthorizationException.fromIntent(intent);
     final AuthState authState = new AuthState(response, error);
     if (response != null) {
-      Log.i(LOG_TAG, String.format("Handled Authorization Response %s ", authState.jsonSerializeString()));
+      Log.i(LOG_TAG, String.format("Handled Authorization Response %s ", authState.toJsonString()));
       AuthorizationService service = new AuthorizationService(this);
       service.performTokenRequest(response.createTokenExchangeRequest(), new AuthorizationService.TokenResponseCallback() {
         @Override
@@ -139,7 +138,7 @@ public class MainActivity extends AppCompatActivity {
 
   private void persistAuthState(@NonNull AuthState authState) {
     getSharedPreferences(SHARED_PREFERENCES_NAME, Context.MODE_PRIVATE).edit()
-        .putString(AUTH_STATE, authState.jsonSerializeString())
+        .putString(AUTH_STATE, authState.toJsonString())
         .commit();
     enablePostAuthorizationFlows();
   }
@@ -157,7 +156,7 @@ public class MainActivity extends AppCompatActivity {
         .getString(AUTH_STATE, null);
     if (!TextUtils.isEmpty(jsonString)) {
       try {
-        return AuthState.jsonDeserialize(jsonString);
+        return AuthState.fromJson(jsonString);
       } catch (JSONException jsonException) {
         // should never happen
       }
@@ -186,7 +185,7 @@ public class MainActivity extends AppCompatActivity {
       AuthorizationRequest.Builder builder = new AuthorizationRequest.Builder(
               serviceConfiguration,
               clientId,
-              ResponseTypeValues.CODE,
+              AuthorizationRequest.RESPONSE_TYPE_CODE,
               redirectUri);
       builder.setScopes("profile");
       AuthorizationRequest request = builder.build();
